@@ -1,0 +1,21 @@
+{
+  "expo": {
+    "name": "LifeMap",
+    "slug": "lifemap-expo",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "automatic",
+    "android": {
+      "package": "com.ricodaily.lifemap"
+    },
+    "plugins": [
+      "expo-document-picker",
+      "expo-sharing"
+    ],
+    "extra": {
+      "eas": {
+        "projectId": "8b43bdf6-b4bc-4b8e-8a9c-43779ba55dde"
+      }
+    }
+  }
+}
