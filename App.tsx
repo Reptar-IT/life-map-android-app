@@ -12,6 +12,8 @@ import {
 } from "react-native-gesture-handler";
 import {
   Alert,
+  KeyboardAvoidingView,
+  Platform,
   PanResponder,
   Pressable,
   ScrollView,
@@ -400,6 +402,45 @@ function AppContent() {
       );
     }
   };
+  const exportChatGPT = async (map: MapDocument) => {
+    try {
+      const byId = new Map(map.nodes.map((n) => [n.id, n]));
+      const children = new Map<string, MapNode[]>();
+      map.nodes.forEach((n) => { if (n.parentId) children.set(n.parentId, [...(children.get(n.parentId) || []), n]); });
+      const lines = [
+        `# LifeMap: ${map.name}`, "", `Exported: ${new Date().toISOString()}`, "",
+        "## Instructions for ChatGPT", "Treat this as a structured personal mind map. Preserve node IDs and hierarchy when proposing changes. Help break goals into actionable tasks, identify dependencies, risks, missing requirements, milestones, and practical next steps. Distinguish recorded facts from suggestions.", "",
+        "## Map overview", `- Map ID: ${map.id}`, `- Total nodes: ${map.nodes.length}`, "",
+        "## Complete hierarchy and node details", ""
+      ];
+      const visited = new Set<string>();
+      const render = (node: MapNode, depth: number) => {
+        if (visited.has(node.id)) return;
+        visited.add(node.id);
+        const indent = "  ".repeat(depth);
+        lines.push(`${indent}- **${node.title}**`);
+        lines.push(`${indent}  - ID: ${node.id}`);
+        lines.push(`${indent}  - Type: ${kindLabel(node.kind)} | Status: ${statusLabel(node.status)}`);
+        if (node.dueDate) lines.push(`${indent}  - Target date: ${node.dueDate}`);
+        if (node.notes?.trim()) lines.push(`${indent}  - Notes: ${node.notes.trim().replace(/\n/g, `\n${indent}    `)}`);
+        if (node.requirement?.trim()) lines.push(`${indent}  - Requirement: ${node.requirement.trim().replace(/\n/g, `\n${indent}    `)}`);
+        if (node.linkedMapIds?.length) lines.push(`${indent}  - Linked map IDs: ${node.linkedMapIds.join(", ")}`);
+        (children.get(node.id) || []).forEach((child) => render(child, depth + 1));
+      };
+      const roots = map.nodes.filter((n) => !n.parentId || !byId.has(n.parentId));
+      roots.forEach((root) => render(root, 0));
+      const orphaned = map.nodes.filter((n) => !visited.has(n.id));
+      if (orphaned.length) { lines.push("", "## Unattached or cyclic nodes"); orphaned.forEach((n) => render(n, 0)); }
+      const dir = FileSystem.cacheDirectory;
+      if (!dir) throw new Error("No writable cache directory is available.");
+      const safeName = map.name.replace(/[^a-z0-9-_]+/gi, "-").replace(/^-|-$/g, "") || "map";
+      const uri = `${dir}lifemap-${safeName}-chatgpt.md`;
+      await FileSystem.writeAsStringAsync(uri, lines.join("\n"), { encoding: FileSystem.EncodingType.UTF8 });
+      if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri, { mimeType: "text/markdown", dialogTitle: "Export map for ChatGPT" });
+      else Alert.alert("Export created", uri);
+    } catch (e) { Alert.alert("Export failed", e instanceof Error ? e.message : "Could not export map details."); }
+  };
+
   const importBackup = async () => {
     try {
       const result = await DocumentPicker.getDocumentAsync({
@@ -567,15 +608,18 @@ function AppContent() {
                   {activeMap.nodes.length} nodes · Auto-saved
                 </Text>
               </View>
+              <Pressable style={s.iconButton} onPress={() => exportChatGPT(activeMap)}><Text style={s.iconButtonText}>AI</Text></Pressable>
               <Text style={s.zoomLabel}>{Math.round(zoom * 100)}%</Text>
             </View>
-            <View style={s.canvasWrap}>
+            {!detailsExpanded && <View style={s.canvasWrap}>
               <Text style={s.canvasHint}>
                 Drag nodes to arrange · Drag green dots onto nodes to reparent
                 or into empty space to create a child · Pinch to zoom
               </Text>
               <MapCanvas
                 map={activeMap}
+                collapsedNodeIds={activeMap.collapsedNodeIds || []}
+                onToggleCollapse={(id) => updateMap(activeMap.id, (m) => ({ ...m, collapsedNodeIds: (m.collapsedNodeIds || []).includes(id) ? (m.collapsedNodeIds || []).filter((v) => v !== id) : [...(m.collapsedNodeIds || []), id] }))}
                 selectedNodeId={selectedNodeId}
                 zoom={zoom}
                 onZoomChange={setZoom}
@@ -588,13 +632,13 @@ function AppContent() {
                 onReparent={reparentNode}
                 onCreateChild={createChildAtConnection}
               />
-            </View>
+            </View>}
             {detailsExpanded && (
-              <View style={s.nodePanel}>
+              <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={s.nodePanel} keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}>
                 <View style={s.panelHeader}>
                   <Pressable
                     style={s.panelToggle}
-                    onPress={() => setDetailsExpanded((v) => !v)}
+                    onPress={() => setDetailsExpanded(false)}
                   >
                     <View style={{ flex: 1 }}>
                       <Text style={s.panelLabel}>
@@ -607,7 +651,7 @@ function AppContent() {
                       </Text>
                     </View>
                     <Text style={s.panelChevron}>
-                      {detailsExpanded ? "⌄" : "⌃"}
+                      {"✕"}
                     </Text>
                   </Pressable>
                   {selectedNode ? (
@@ -849,7 +893,7 @@ function AppContent() {
                     </Text>
                   </ScrollView>
                 )}
-              </View>
+              </KeyboardAvoidingView>
             )}
           </View>
         )}
@@ -1009,6 +1053,8 @@ function AppContent() {
 
 function MapCanvas({
   map,
+  collapsedNodeIds,
+  onToggleCollapse,
   selectedNodeId,
   zoom,
   onZoomChange,
@@ -1019,6 +1065,8 @@ function MapCanvas({
   onCreateChild,
 }: {
   map: MapDocument;
+  collapsedNodeIds: string[];
+  onToggleCollapse: (id: string) => void;
   selectedNodeId: string | null;
   zoom: number;
   onZoomChange: (value: number | ((previous: number) => number)) => void;
@@ -1141,7 +1189,16 @@ function MapCanvas({
     x: viewport.width / 2 + (node.x - camera.x) * zoom,
     y: viewport.height / 2 + (node.y - camera.y) * zoom,
   });
+  const hiddenIds = new Set<string>();
+  const queue = [...collapsedNodeIds];
+  while (queue.length) {
+    const parentId = queue.shift()!;
+    for (const child of map.nodes.filter((n) => n.parentId === parentId)) {
+      if (!hiddenIds.has(child.id)) { hiddenIds.add(child.id); queue.push(child.id); }
+    }
+  }
   const visibleNodes = map.nodes.filter((node) => {
+    if (hiddenIds.has(node.id)) return false;
     const p = screen(node);
     return (
       p.x > -nodeWidth * 2 &&
@@ -1151,7 +1208,7 @@ function MapCanvas({
     );
   });
   const connectors = map.nodes
-    .filter((node) => node.parentId && byId.has(node.parentId))
+    .filter((node) => !hiddenIds.has(node.id) && node.parentId && byId.has(node.parentId) && !hiddenIds.has(node.parentId))
     .map((node) => {
       const parent = byId.get(node.parentId!)!;
       const inferred = autoConnectionSides(parent, node);
@@ -1222,7 +1279,9 @@ function MapCanvas({
           : "top";
     onReparent(sourceId, target.id, sourceSide, targetSide);
   };
-  const connectionHandles = selectedNodeId
+  // A selected node can become hidden when one of its ancestors is collapsed.
+  // Do not leave its connection handles (green extender dots) on the canvas.
+  const connectionHandles = selectedNodeId && !hiddenIds.has(selectedNodeId)
     ? (() => {
         const node = byId.get(selectedNodeId);
         if (!node) return null;
@@ -1272,9 +1331,11 @@ function MapCanvas({
         </Svg>
         {visibleNodes.map((node) => {
           const p = screen(node);
+          const hasChildren = map.nodes.some((n) => n.parentId === node.id);
+          const collapsed = collapsedNodeIds.includes(node.id);
           return (
+            <React.Fragment key={node.id}>
             <DraggableNode
-              key={node.id}
               node={node}
               selected={node.id === selectedNodeId}
               width={nodeWidth}
@@ -1286,6 +1347,12 @@ function MapCanvas({
               onOpenDetails={() => onOpenDetails(node.id)}
               onMove={(x, y) => onMove(node.id, x, y)}
             />
+            {hasChildren && (
+              <Pressable onPress={() => onToggleCollapse(node.id)} style={{ position: "absolute", left: p.x + nodeWidth * zoom / 2 - 10, top: p.y + nodeHeight * zoom / 2 - 10, width: 22, height: 22, borderRadius: 11, backgroundColor: C.primary, borderWidth: 2, borderColor: "#FFFFFF", alignItems: "center", justifyContent: "center", zIndex: 25, elevation: 6 }}>
+                <Text style={{ color: "#FFFFFF", fontSize: 14, fontWeight: "800", lineHeight: 17 }}>{collapsed ? "+" : "−"}</Text>
+              </Pressable>
+            )}
+            </React.Fragment>
           );
         })}
         {connectionHandles}
@@ -1293,7 +1360,7 @@ function MapCanvas({
           <Text style={s.canvasFooterText}>
             Drag green dots onto nodes to reparent, or into empty space to
             create a child · pinch to zoom · drag empty space to pan ·{" "}
-            {Math.round(zoom * 100)}% · {map.nodes.length} nodes
+            {Math.round(zoom * 100)}% · {visibleNodes.length}/{map.nodes.length} visible nodes
           </Text>
         </View>
       </View>
@@ -1635,7 +1702,7 @@ const s = StyleSheet.create({
   },
   canvasFooterText: { color: C.muted, fontSize: 9 },
   nodePanel: {
-    maxHeight: "48%",
+    flex: 1,
     paddingHorizontal: 12,
     paddingTop: 8,
     paddingBottom: 7,
@@ -1676,7 +1743,7 @@ const s = StyleSheet.create({
     borderColor: "#B9DCCD",
   },
   saveIcon: { fontSize: 21, color: C.primary, fontWeight: "800" },
-  nodeDetailsScroll: { maxHeight: 300 },
+  nodeDetailsScroll: { flex: 1 },
   collapsedAddRow: {
     flexDirection: "row",
     alignItems: "center",

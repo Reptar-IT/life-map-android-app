@@ -5,12 +5,22 @@
     "version": "1.0.0",
     "orientation": "portrait",
     "userInterfaceStyle": "automatic",
+    "icon": "./assets/icon.png",
     "android": {
       "package": "com.ricodaily.lifemap"
     },
     "plugins": [
       "expo-document-picker",
-      "expo-sharing"
+      "expo-sharing",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-icon.png",
+          "imageWidth": 250,
+          "resizeMode": "contain",
+          "backgroundColor": "#080808"
+        }
+      ]
     ],
     "extra": {
       "eas": {

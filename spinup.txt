@@ -1,0 +1,5 @@
+npm install
+npx expo-doctor
+npx eas-cli login
+npx eas-cli build:configure
+npx eas-cli build --platform android --profile production

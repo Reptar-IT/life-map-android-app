@@ -35,6 +35,7 @@ export type MapDocument = {
   nodes: MapNode[];
   createdAt: string;
   updatedAt: string;
+  collapsedNodeIds?: string[];
 };
 
 export const makeId = () =>
@@ -131,6 +132,9 @@ export function normalizeMaps(value: unknown): MapDocument[] {
       return {
         ...m,
         nodes,
+        collapsedNodeIds: Array.isArray(m.collapsedNodeIds)
+          ? m.collapsedNodeIds.filter((id: unknown) => typeof id === "string")
+          : [],
         createdAt: m.createdAt || now,
         updatedAt: m.updatedAt || now,
       } as MapDocument;
