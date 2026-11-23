@@ -158,7 +158,7 @@ export const makeId = (): string =>
 export const statusColor = (status: NodeStatus): string =>
   ({
     planned: "#DCE9FF",
-    "in-progress": "#FFF0C2",
+    "in-progress": "#DCE9FF",
     done: "#DDF4E4",
     idea: "#F9DDDD",
   })[status];
