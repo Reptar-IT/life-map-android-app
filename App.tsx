@@ -39,6 +39,12 @@ import {
   createNode,
   makeId,
   normalizeMaps,
+  getNodeParentIds,
+  getNodeChildren,
+  getNodeDescendants,
+  createParentConnection,
+  wouldCreateParentCycle,
+  statusColor,
 } from "./src/types/map";
 import { loadMaps, saveMaps } from "./src/storage/maps";
 
@@ -226,9 +232,7 @@ function AppContent() {
       activeMap.nodes.find((n) => n.id === selectedNodeId) ??
       activeMap.nodes[0];
     const direction = activeMap.nodes.length % 2 === 0 ? 1 : -1;
-    const childCount = activeMap.nodes.filter(
-      (n) => n.parentId === parent.id,
-    ).length;
+    const childCount = getNodeChildren(activeMap.nodes, parent.id).length;
     const node = createNode(
       title,
       parent.x + direction * (145 + (childCount % 2) * 20),
@@ -236,17 +240,41 @@ function AppContent() {
       parent.id,
       PALETTE[activeMap.nodes.length % PALETTE.length],
     );
-    Object.assign(node, autoConnectionSides(parent, node));
+    const sides = autoConnectionSides(parent, node);
+    node.parentConnections = [
+      createParentConnection(parent, node, sides.parentSide, sides.childSide),
+    ];
+    Object.assign(node, sides);
     updateMap(activeMap.id, (m) => ({ ...m, nodes: [...m.nodes, node] }));
     setSelectedNodeId(node.id);
     setNodeDraft("");
   };
-  const moveNode = (id: string, x: number, y: number) => {
-    if (!activeMap) return;
+  // Drag callbacks provide incremental movement, not absolute coordinates.
+  // This avoids applying cumulative gesture coordinates repeatedly when React
+  // batches state updates during a fast drag.
+  const moveNode = (id: string, deltaX: number, deltaY: number) => {
+    if (!activeMap || (deltaX === 0 && deltaY === 0)) return;
+    const movingNode = activeMap.nodes.find((node) => node.id === id);
+    if (!movingNode) return;
+
+    // Move the full descendant closure, including collapsed descendants and
+    // nodes connected through multiple parents, by the same incremental delta.
+    const branchIds = new Set([
+      id,
+      ...getNodeDescendants(activeMap.nodes, id).map((node) => node.id),
+    ]);
+    const now = new Date().toISOString();
     updateMap(activeMap.id, (m) => ({
       ...m,
-      nodes: m.nodes.map((n) =>
-        n.id === id ? { ...n, x, y, updatedAt: new Date().toISOString() } : n,
+      nodes: m.nodes.map((node) =>
+        branchIds.has(node.id)
+          ? {
+              ...node,
+              x: node.x + deltaX,
+              y: node.y + deltaY,
+              updatedAt: now,
+            }
+          : node,
       ),
     }));
   };
@@ -259,8 +287,6 @@ function AppContent() {
     if (!activeMap) return;
     const parent = activeMap.nodes.find((n) => n.id === parentId);
     if (!parent) return;
-    // Keep the dragged attachment side fixed and choose the child's facing edge
-    // from the final drop position. The coordinates are map/world coordinates.
     const child = createNode(
       "New node",
       x,
@@ -271,6 +297,9 @@ function AppContent() {
     const sides = autoConnectionSides(parent, child);
     child.parentSide = parentSide;
     child.childSide = sides.childSide;
+    child.parentConnections = [
+      createParentConnection(parent, child, parentSide, sides.childSide),
+    ];
     updateMap(activeMap.id, (m) => ({ ...m, nodes: [...m.nodes, child] }));
     setSelectedNodeId(child.id);
     setDetailsExpanded(true);
@@ -284,31 +313,40 @@ function AppContent() {
   ) => {
     if (!activeMap || sourceId === targetId) return;
     const byId = new Map(activeMap.nodes.map((n) => [n.id, n]));
-    const source = byId.get(sourceId),
-      target = byId.get(targetId);
+    const source = byId.get(sourceId);
+    const target = byId.get(targetId);
     if (!source || !target) return;
-    if (!source.parentId) {
+    if (wouldCreateParentCycle(activeMap.nodes, sourceId, targetId)) {
+      Alert.alert(
+        "Invalid connection",
+        "A node cannot be connected to itself or one of its descendants.",
+      );
+      return;
+    }
+    const existingParentIds = getNodeParentIds(source);
+    if (existingParentIds.length === 0) {
       Alert.alert("Main node", "The main node cannot be reparented.");
       return;
     }
-    let cursor: MapNode | undefined = target;
-    while (cursor) {
-      if (cursor.id === sourceId) {
-        Alert.alert(
-          "Invalid connection",
-          "A node cannot be connected to one of its descendants.",
-        );
-        return;
-      }
-      cursor = cursor.parentId ? byId.get(cursor.parentId) : undefined;
+    if (existingParentIds.includes(targetId)) {
+      Alert.alert("Already connected", "This node already has that parent.");
+      return;
     }
+    const connection = createParentConnection(
+      target,
+      source,
+      targetSide,
+      sourceSide,
+    );
     updateMap(activeMap.id, (m) => ({
       ...m,
       nodes: m.nodes.map((n) =>
         n.id === sourceId
           ? {
               ...n,
-              parentId: targetId,
+              parentId: n.parentId ?? targetId,
+              parentIds: [...existingParentIds, targetId],
+              parentConnections: [...(n.parentConnections ?? []), connection],
               childSide: sourceSide,
               parentSide: targetSide,
               updatedAt: new Date().toISOString(),
@@ -320,11 +358,12 @@ function AppContent() {
   };
   const deleteNode = () => {
     if (!activeMap || !selectedNode) return;
-    if (!selectedNode.parentId)
+    const parentIds = getNodeParentIds(selectedNode);
+    if (!parentIds.length)
       return Alert.alert("Main node", "The root node cannot be deleted.");
     Alert.alert(
       "Delete node?",
-      `Delete “${selectedNode.title}”? Its children will connect to its parent.`,
+      `Delete “${selectedNode.title}”? Its children will be reconnected to its other parents where possible.`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -335,11 +374,50 @@ function AppContent() {
               ...m,
               nodes: m.nodes
                 .filter((n) => n.id !== selectedNode.id)
-                .map((n) =>
-                  n.parentId === selectedNode.id
-                    ? { ...n, parentId: selectedNode.parentId }
-                    : n,
-                ),
+                .map((node) => {
+                  const nodeParents = getNodeParentIds(node);
+                  if (!nodeParents.includes(selectedNode.id)) return node;
+                  const survivingParents = nodeParents.filter(
+                    (id) => id !== selectedNode.id,
+                  );
+                  const inheritedParents = parentIds.filter(
+                    (id) => id !== node.id && !survivingParents.includes(id),
+                  );
+                  const remainingParents = [
+                    ...new Set([...survivingParents, ...inheritedParents]),
+                  ];
+                  const remainingConnections = (node.parentConnections ?? [])
+                    .filter(
+                      (connection) => connection.parentId !== selectedNode.id,
+                    )
+                    .filter((connection) =>
+                      remainingParents.includes(connection.parentId),
+                    );
+                  const newConnections = inheritedParents
+                    .map((parentId) => {
+                      const parent = m.nodes.find(
+                        (candidate) => candidate.id === parentId,
+                      );
+                      return parent
+                        ? createParentConnection(parent, node)
+                        : null;
+                    })
+                    .filter(
+                      (
+                        connection,
+                      ): connection is NonNullable<typeof connection> =>
+                        connection !== null,
+                    );
+                  return {
+                    ...node,
+                    parentIds: remainingParents,
+                    parentId: remainingParents[0] ?? null,
+                    parentConnections: [
+                      ...remainingConnections,
+                      ...newConnections,
+                    ],
+                  };
+                }),
             }));
             setSelectedNodeId(null);
           },
@@ -350,47 +428,58 @@ function AppContent() {
   const cloneNode = () => {
     if (!activeMap || !selectedNode) return;
     const now = new Date().toISOString();
-    // A clone duplicates this node's complete details, but not its descendants.
-    // Cloning the root creates a child of the root rather than a second root.
-    const parentId = selectedNode.parentId ?? selectedNode.id;
-    const parent =
-      activeMap.nodes.find((n) => n.id === parentId) ?? selectedNode;
+    const originalParents = getNodeParentIds(selectedNode);
+    const parentIds = originalParents.length
+      ? originalParents
+      : [selectedNode.id];
+    const parents = parentIds
+      .map((parentId) => activeMap.nodes.find((node) => node.id === parentId))
+      .filter((node): node is MapNode => Boolean(node));
     const clone: MapNode = {
       ...selectedNode,
       id: makeId(),
       title: `Copy of ${selectedNode.title}`,
       x: selectedNode.x + 72,
       y: selectedNode.y + 64,
-      parentId,
+      parentId: parentIds[0] ?? null,
+      parentIds,
+      parentConnections: [],
       linkedMapIds: [...(selectedNode.linkedMapIds ?? [])],
       createdAt: now,
       updatedAt: now,
     };
-    const sides = autoConnectionSides(parent, clone);
-    clone.parentSide = sides.parentSide;
-    clone.childSide = sides.childSide;
+    clone.parentConnections = parents.map((parent) =>
+      createParentConnection(parent, clone),
+    );
     updateMap(activeMap.id, (m) => ({ ...m, nodes: [...m.nodes, clone] }));
     setSelectedNodeId(clone.id);
     setDetailsExpanded(true);
   };
+
+  const createBackupFile = async (backupMaps: MapDocument[]) => {
+    const payload = JSON.stringify(
+      {
+        app: "LifeMap",
+        formatVersion: 1,
+        exportedAt: new Date().toISOString(),
+        maps: backupMaps,
+      },
+      null,
+      2,
+    );
+    const dir = FileSystem.cacheDirectory;
+    if (!dir) throw new Error("No writable cache directory is available.");
+    const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+    const uri = `${dir}lifemap-backup-${timestamp}.json`;
+    await FileSystem.writeAsStringAsync(uri, payload, {
+      encoding: FileSystem.EncodingType.UTF8,
+    });
+    return uri;
+  };
+
   const exportBackup = async () => {
     try {
-      const payload = JSON.stringify(
-        {
-          app: "LifeMap",
-          formatVersion: 1,
-          exportedAt: new Date().toISOString(),
-          maps,
-        },
-        null,
-        2,
-      );
-      const dir = FileSystem.cacheDirectory;
-      if (!dir) throw new Error("No writable cache directory is available.");
-      const uri = `${dir}lifemap-backup-${new Date().toISOString().slice(0, 10)}.json`;
-      await FileSystem.writeAsStringAsync(uri, payload, {
-        encoding: FileSystem.EncodingType.UTF8,
-      });
+      const uri = await createBackupFile(maps);
       if (await Sharing.isAvailableAsync())
         await Sharing.shareAsync(uri, {
           mimeType: "application/json",
@@ -404,14 +493,86 @@ function AppContent() {
       );
     }
   };
+
+  const requestDeleteMap = (map: MapDocument) => {
+    Alert.alert(
+      "Back up before deleting",
+      `Create and share a backup of your maps before deleting “${map.name}”?`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Back up",
+          onPress: async () => {
+            try {
+              const uri = await createBackupFile(maps);
+              if (!(await Sharing.isAvailableAsync())) {
+                Alert.alert(
+                  "Sharing unavailable",
+                  `A backup file was created in temporary app storage, but it has not been safely exported. The map has not been deleted.\n\n${uri}`,
+                );
+                return;
+              }
+              await Sharing.shareAsync(uri, {
+                mimeType: "application/json",
+                dialogTitle: `Back up LifeMap before deleting ${map.name}`,
+              });
+              Alert.alert(
+                "Confirm your backup",
+                "The share sheet has closed. Only continue if you saved or sent the backup somewhere you can retrieve it. The map will remain unchanged if you cancel.",
+                [
+                  { text: "Keep map", style: "cancel" },
+                  {
+                    text: "I saved the backup — delete map",
+                    style: "destructive",
+                    onPress: () => {
+                      Alert.alert(
+                        "Delete map?",
+                        `Permanently delete “${map.name}” from this device?`,
+                        [
+                          { text: "Cancel", style: "cancel" },
+                          {
+                            text: "Delete permanently",
+                            style: "destructive",
+                            onPress: () => {
+                              setMaps((current) =>
+                                current.filter((item) => item.id !== map.id),
+                              );
+                              if (activeMapId === map.id) {
+                                setActiveMapId(null);
+                                setSelectedNodeId(null);
+                                setDetailsExpanded(false);
+                              }
+                            },
+                          },
+                        ],
+                      );
+                    },
+                  },
+                ],
+              );
+            } catch (e) {
+              Alert.alert(
+                "Backup failed",
+                e instanceof Error
+                  ? e.message
+                  : "Could not create or share the backup. The map has not been deleted.",
+              );
+            }
+          },
+        },
+      ],
+    );
+  };
+
   const exportChatGPT = async (map: MapDocument) => {
     try {
       const byId = new Map(map.nodes.map((n) => [n.id, n]));
       const children = new Map<string, MapNode[]>();
-      map.nodes.forEach((n) => {
-        if (n.parentId)
-          children.set(n.parentId, [...(children.get(n.parentId) || []), n]);
-      });
+      map.nodes.forEach((node) =>
+        getNodeParentIds(node).forEach((parentId) =>
+          children.set(parentId, [...(children.get(parentId) || []), node]),
+        ),
+      );
       const lines = [
         `# LifeMap: ${map.name}`,
         "",
@@ -451,18 +612,25 @@ function AppContent() {
           lines.push(
             `${indent}  - Linked map IDs: ${node.linkedMapIds.join(", ")}`,
           );
+        if (getNodeParentIds(node).length > 1)
+          lines.push(
+            `${indent}  - Additional parents: ${getNodeParentIds(node)
+              .filter((id) => id !== getNodeParentIds(node)[0])
+              .join(", ")}`,
+          );
         (children.get(node.id) || []).forEach((child) =>
           render(child, depth + 1),
         );
       };
       const roots = map.nodes.filter(
-        (n) => !n.parentId || !byId.has(n.parentId),
+        (node) =>
+          !getNodeParentIds(node).some((parentId) => byId.has(parentId)),
       );
       roots.forEach((root) => render(root, 0));
-      const orphaned = map.nodes.filter((n) => !visited.has(n.id));
+      const orphaned = map.nodes.filter((node) => !visited.has(node.id));
       if (orphaned.length) {
         lines.push("", "## Unattached or cyclic nodes");
-        orphaned.forEach((n) => render(n, 0));
+        orphaned.forEach((node) => render(node, 0));
       }
       const dir = FileSystem.cacheDirectory;
       if (!dir) throw new Error("No writable cache directory is available.");
@@ -594,24 +762,30 @@ function AppContent() {
             </View>
             <Text style={s.sectionTitle}>Your maps · {maps.length}</Text>
             {maps.map((m) => (
-              <Pressable
-                key={m.id}
-                style={s.mapCard}
-                onPress={() => openMap(m)}
-              >
-                <View style={s.mapGlyph}>
-                  <Text style={s.mapGlyphText}>✳</Text>
-                </View>
-                <View style={{ flex: 1 }}>
-                  <Text style={s.mapName}>{m.name}</Text>
-                  <Text style={s.mapMeta}>
-                    {m.type === "genogram" ? "Genogram" : "Mind map"} ·{" "}
-                    {m.nodes.length} nodes · Updated{" "}
-                    {new Date(m.updatedAt).toLocaleDateString()}
-                  </Text>
-                </View>
-                <Text style={s.chevron}>›</Text>
-              </Pressable>
+              <View key={m.id} style={s.mapCard}>
+                <Pressable style={s.mapCardMain} onPress={() => openMap(m)}>
+                  <View style={s.mapGlyph}>
+                    <Text style={s.mapGlyphText}>✳</Text>
+                  </View>
+                  <View style={{ flex: 1 }}>
+                    <Text style={s.mapName}>{m.name}</Text>
+                    <Text style={s.mapMeta}>
+                      {m.type === "genogram" ? "Genogram" : "Mind map"} ·{" "}
+                      {m.nodes.length} nodes · Updated{" "}
+                      {new Date(m.updatedAt).toLocaleDateString()}
+                    </Text>
+                  </View>
+                  <Text style={s.chevron}>›</Text>
+                </Pressable>
+                <Pressable
+                  accessibilityRole="button"
+                  accessibilityLabel={`Delete ${m.name} map`}
+                  style={s.mapDeleteAction}
+                  onPress={() => requestDeleteMap(m)}
+                >
+                  <Text style={s.mapDeleteActionText}>Delete</Text>
+                </Pressable>
+              </View>
             ))}
             <View style={s.createCard}>
               <Text style={s.sectionTitle}>Create a map</Text>
@@ -666,8 +840,9 @@ function AppContent() {
               style={[s.canvasWrap, detailsExpanded && { display: "none" }]}
             >
               <Text style={s.canvasHint}>
-                Drag nodes to arrange · Drag green dots onto nodes to reparent
-                or into empty space to create a child · Pinch to zoom
+                Drag nodes to arrange · Drag green dots onto nodes to add a
+                parent connection or into empty space to create a child · Pinch
+                to zoom
               </Text>
               <MapCanvas
                 map={activeMap}
@@ -770,8 +945,9 @@ function AppContent() {
                           placeholderTextColor="#91A09A"
                         />
                         <Text style={s.helper}>
-                          To change a node’s parent, select it and drag one of
-                          its connection dots onto the new parent.
+                          Drag a connection dot onto another node to add an
+                          additional parent connection. A node can have more
+                          than one parent.
                         </Text>
                         <Text style={s.fieldLabel}>Type</Text>
                         <ScrollView
@@ -1215,8 +1391,6 @@ function MapCanvas({
     const e = event.nativeEvent;
     const fx = typeof e.focalX === "number" ? e.focalX : viewport.width / 2;
     const fy = typeof e.focalY === "number" ? e.focalY : viewport.height / 2;
-    // Capture the camera and pinch focal point once per gesture. Reusing the
-    // moving focal point here causes the whole map to drift while zooming.
     if (!pinchStart.current)
       pinchStart.current = {
         zoom: zoomRef.current,
@@ -1255,12 +1429,12 @@ function MapCanvas({
   const queue = [...collapsedNodeIds];
   while (queue.length) {
     const parentId = queue.shift()!;
-    for (const child of map.nodes.filter((n) => n.parentId === parentId)) {
+    getNodeChildren(map.nodes, parentId).forEach((child) => {
       if (!hiddenIds.has(child.id)) {
         hiddenIds.add(child.id);
         queue.push(child.id);
       }
-    }
+    });
   }
   const visibleNodes = map.nodes.filter((node) => {
     if (hiddenIds.has(node.id)) return false;
@@ -1272,43 +1446,61 @@ function MapCanvas({
       p.y < viewport.height + nodeHeight * 2
     );
   });
+
   const connectors = map.nodes
-    .filter(
-      (node) =>
-        !hiddenIds.has(node.id) &&
-        node.parentId &&
-        byId.has(node.parentId) &&
-        !hiddenIds.has(node.parentId),
-    )
-    .map((node) => {
-      const parent = byId.get(node.parentId!)!;
-      const inferred = autoConnectionSides(parent, node);
-      const parentSide = node.parentSide || inferred.parentSide;
-      const childSide = node.childSide || inferred.childSide;
-      const a = screen(
-        sidePoint(parent, parentSide, nodeWidth, nodeHeight) as MapNode,
-      );
-      const b = screen(
-        sidePoint(node, childSide, nodeWidth, nodeHeight) as MapNode,
-      );
-      if (
-        Math.max(a.x, b.x) < -20 ||
-        Math.min(a.x, b.x) > viewport.width + 20 ||
-        Math.max(a.y, b.y) < -20 ||
-        Math.min(a.y, b.y) > viewport.height + 20
-      )
-        return null;
-      return (
-        <Line
-          key={node.id}
-          x1={a.x}
-          y1={a.y}
-          x2={b.x}
-          y2={b.y}
-          stroke="#AFC5BB"
-          strokeWidth={2.2 * zoom}
-        />
-      );
+    .filter((node) => !hiddenIds.has(node.id))
+    .flatMap((node) => {
+      const parentIds = getNodeParentIds(node);
+      return parentIds
+        .filter((parentId) => byId.has(parentId) && !hiddenIds.has(parentId))
+        .map((parentId) => {
+          const parent = byId.get(parentId)!;
+          const saved = (node.parentConnections ?? []).find(
+            (connection) => connection.parentId === parentId,
+          );
+          const inferred = autoConnectionSides(parent, node);
+          const parentSide =
+            saved?.parentSide ??
+            (parentId === node.parentId ? node.parentSide : undefined) ??
+            inferred.parentSide;
+          const childSide =
+            saved?.childSide ??
+            (parentId === node.parentId ? node.childSide : undefined) ??
+            inferred.childSide;
+          const parentPoint = sidePoint(
+            parent,
+            parentSide,
+            nodeWidth,
+            nodeHeight,
+          );
+          const childPoint = sidePoint(node, childSide, nodeWidth, nodeHeight);
+          const a = {
+            x: viewport.width / 2 + (parentPoint.x - camera.x) * zoom,
+            y: viewport.height / 2 + (parentPoint.y - camera.y) * zoom,
+          };
+          const b = {
+            x: viewport.width / 2 + (childPoint.x - camera.x) * zoom,
+            y: viewport.height / 2 + (childPoint.y - camera.y) * zoom,
+          };
+          if (
+            Math.max(a.x, b.x) < -20 ||
+            Math.min(a.x, b.x) > viewport.width + 20 ||
+            Math.max(a.y, b.y) < -20 ||
+            Math.min(a.y, b.y) > viewport.height + 20
+          )
+            return null;
+          return (
+            <Line
+              key={`${parentId}-${node.id}`}
+              x1={a.x}
+              y1={a.y}
+              x2={b.x}
+              y2={b.y}
+              stroke="#AFC5BB"
+              strokeWidth={2.2 * zoom}
+            />
+          );
+        });
     })
     .filter(Boolean);
 
@@ -1329,8 +1521,6 @@ function MapCanvas({
       );
     });
     if (!target) {
-      // Dropping a connection handle into empty canvas creates a new child at
-      // the drop point. Convert screen coordinates back into stable map space.
       const worldX = camera.x + (dropX - viewport.width / 2) / zoom;
       const worldY = camera.y + (dropY - viewport.height / 2) / zoom;
       onCreateChild(sourceId, sourceSide, worldX, worldY);
@@ -1350,14 +1540,11 @@ function MapCanvas({
           : "top";
     onReparent(sourceId, target.id, sourceSide, targetSide);
   };
-  // A selected node can become hidden when one of its ancestors is collapsed.
-  // Do not leave its connection handles (green extender dots) on the canvas.
   const connectionHandles =
     selectedNodeId && !hiddenIds.has(selectedNodeId)
       ? (() => {
           const node = byId.get(selectedNodeId);
           if (!node) return null;
-          const p = screen(node);
           return SIDES.map((side) => {
             const pt = sidePoint(node, side, nodeWidth, nodeHeight);
             const sx = viewport.width / 2 + (pt.x - camera.x) * zoom;
@@ -1403,7 +1590,7 @@ function MapCanvas({
         </Svg>
         {visibleNodes.map((node) => {
           const p = screen(node);
-          const hasChildren = map.nodes.some((n) => n.parentId === node.id);
+          const hasChildren = getNodeChildren(map.nodes, node.id).length > 0;
           const collapsed = collapsedNodeIds.includes(node.id);
           return (
             <React.Fragment key={node.id}>
@@ -1456,8 +1643,8 @@ function MapCanvas({
         {connectionHandles}
         <View pointerEvents="none" style={s.canvasFooter}>
           <Text style={s.canvasFooterText}>
-            Drag green dots onto nodes to reparent, or into empty space to
-            create a child · pinch to zoom · drag empty space to pan ·{" "}
+            Drag green dots onto nodes to add a parent connection, or into empty
+            space to create a child · pinch to zoom · drag empty space to pan ·{" "}
             {Math.round(zoom * 100)}% · {visibleNodes.length}/{map.nodes.length}{" "}
             visible nodes
           </Text>
@@ -1466,6 +1653,7 @@ function MapCanvas({
     </PinchGestureHandler>
   );
 }
+
 function ConnectionHandle({
   x,
   y,
@@ -1554,23 +1742,18 @@ function DraggableNode({
 }) {
   const renderedWidth = width * zoom;
   const renderedHeight = height * zoom;
-  const readableZoom = Math.max(0.65, zoom);
-  const latest = useRef({ x: node.x, y: node.y });
-  const start = useRef({ x: node.x, y: node.y });
+  const lastGesture = useRef({ x: 0, y: 0 });
   const lastTap = useRef(0);
   const dragged = useRef(false);
   const callbacks = useRef({ onSelect, onOpenDetails, onMove, zoom });
   callbacks.current = { onSelect, onOpenDetails, onMove, zoom };
-  useEffect(() => {
-    latest.current = { x: node.x, y: node.y };
-  }, [node.x, node.y]);
   const responder = React.useMemo(
     () =>
       PanResponder.create({
         onStartShouldSetPanResponder: () => true,
         onMoveShouldSetPanResponder: () => true,
         onPanResponderGrant: () => {
-          start.current = { ...latest.current };
+          lastGesture.current = { x: 0, y: 0 };
           dragged.current = false;
           callbacks.current.onSelect();
         },
@@ -1578,10 +1761,10 @@ function DraggableNode({
           if (Math.abs(g.dx) > 5 || Math.abs(g.dy) > 5) dragged.current = true;
           if (dragged.current) {
             const scale = Math.max(0.01, callbacks.current.zoom);
-            callbacks.current.onMove(
-              start.current.x + g.dx / scale,
-              start.current.y + g.dy / scale,
-            );
+            const deltaX = (g.dx - lastGesture.current.x) / scale;
+            const deltaY = (g.dy - lastGesture.current.y) / scale;
+            lastGesture.current = { x: g.dx, y: g.dy };
+            callbacks.current.onMove(deltaX, deltaY);
           }
         },
         onPanResponderRelease: (_e, g) => {
@@ -1611,14 +1794,7 @@ function DraggableNode({
         borderRadius: 14 * zoom,
         borderWidth: (selected ? 2.5 : 1) * zoom,
         borderColor: selected ? C.primary : "#D3E2DB",
-        backgroundColor:
-          node.status === "planned"
-            ? "#DDE8FB"
-            : node.status === "in-progress"
-              ? "#DDE8FB"
-              : node.status === "done"
-                ? "#D8F0DF"
-                : "#F9DDDD",
+        backgroundColor: statusColor(node.status),
         alignItems: "center",
         justifyContent: "center",
         paddingHorizontal: 7 * zoom,
@@ -1704,12 +1880,34 @@ const s = StyleSheet.create({
   mapCard: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    padding: 14,
+    gap: 8,
+    padding: 10,
     borderRadius: 16,
     backgroundColor: C.surface,
     borderWidth: 1,
     borderColor: C.border,
+  },
+  mapCardMain: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+    padding: 4,
+  },
+  mapDeleteAction: {
+    minHeight: 36,
+    paddingHorizontal: 11,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "#E8C9C5",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "#FFF9F8",
+  },
+  mapDeleteActionText: {
+    color: C.danger,
+    fontSize: 10,
+    fontWeight: "800",
   },
   mapGlyph: {
     width: 42,
