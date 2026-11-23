@@ -69,6 +69,7 @@ const KINDS: NodeKind[] = [
   "milestone",
   "requirement",
   "note",
+  "person",
 ];
 const STATUSES: NodeStatus[] = ["idea", "planned", "in-progress", "done"];
 const kindLabel = (k?: NodeKind) =>
@@ -80,6 +81,7 @@ const kindLabel = (k?: NodeKind) =>
     milestone: "Milestone",
     requirement: "Requirement",
     note: "Note",
+    person: "Person",
   })[k || "idea"];
 const statusLabel = (v?: NodeStatus) =>
   ({
@@ -406,12 +408,24 @@ function AppContent() {
     try {
       const byId = new Map(map.nodes.map((n) => [n.id, n]));
       const children = new Map<string, MapNode[]>();
-      map.nodes.forEach((n) => { if (n.parentId) children.set(n.parentId, [...(children.get(n.parentId) || []), n]); });
+      map.nodes.forEach((n) => {
+        if (n.parentId)
+          children.set(n.parentId, [...(children.get(n.parentId) || []), n]);
+      });
       const lines = [
-        `# LifeMap: ${map.name}`, "", `Exported: ${new Date().toISOString()}`, "",
-        "## Instructions for ChatGPT", "Treat this as a structured personal mind map. Preserve node IDs and hierarchy when proposing changes. Help break goals into actionable tasks, identify dependencies, risks, missing requirements, milestones, and practical next steps. Distinguish recorded facts from suggestions.", "",
-        "## Map overview", `- Map ID: ${map.id}`, `- Total nodes: ${map.nodes.length}`, "",
-        "## Complete hierarchy and node details", ""
+        `# LifeMap: ${map.name}`,
+        "",
+        `Exported: ${new Date().toISOString()}`,
+        "",
+        "## Instructions for ChatGPT",
+        "Treat this as a structured personal mind map. Preserve node IDs and hierarchy when proposing changes. Help break goals into actionable tasks, identify dependencies, risks, missing requirements, milestones, and practical next steps. Distinguish recorded facts from suggestions.",
+        "",
+        "## Map overview",
+        `- Map ID: ${map.id}`,
+        `- Total nodes: ${map.nodes.length}`,
+        "",
+        "## Complete hierarchy and node details",
+        "",
       ];
       const visited = new Set<string>();
       const render = (node: MapNode, depth: number) => {
@@ -420,25 +434,56 @@ function AppContent() {
         const indent = "  ".repeat(depth);
         lines.push(`${indent}- **${node.title}**`);
         lines.push(`${indent}  - ID: ${node.id}`);
-        lines.push(`${indent}  - Type: ${kindLabel(node.kind)} | Status: ${statusLabel(node.status)}`);
-        if (node.dueDate) lines.push(`${indent}  - Target date: ${node.dueDate}`);
-        if (node.notes?.trim()) lines.push(`${indent}  - Notes: ${node.notes.trim().replace(/\n/g, `\n${indent}    `)}`);
-        if (node.requirement?.trim()) lines.push(`${indent}  - Requirement: ${node.requirement.trim().replace(/\n/g, `\n${indent}    `)}`);
-        if (node.linkedMapIds?.length) lines.push(`${indent}  - Linked map IDs: ${node.linkedMapIds.join(", ")}`);
-        (children.get(node.id) || []).forEach((child) => render(child, depth + 1));
+        lines.push(
+          `${indent}  - Type: ${kindLabel(node.kind)} | Status: ${statusLabel(node.status)}`,
+        );
+        if (node.dueDate)
+          lines.push(`${indent}  - Target date: ${node.dueDate}`);
+        if (node.notes?.trim())
+          lines.push(
+            `${indent}  - Notes: ${node.notes.trim().replace(/\n/g, `\n${indent}    `)}`,
+          );
+        if (node.requirement?.trim())
+          lines.push(
+            `${indent}  - Requirement: ${node.requirement.trim().replace(/\n/g, `\n${indent}    `)}`,
+          );
+        if (node.linkedMapIds?.length)
+          lines.push(
+            `${indent}  - Linked map IDs: ${node.linkedMapIds.join(", ")}`,
+          );
+        (children.get(node.id) || []).forEach((child) =>
+          render(child, depth + 1),
+        );
       };
-      const roots = map.nodes.filter((n) => !n.parentId || !byId.has(n.parentId));
+      const roots = map.nodes.filter(
+        (n) => !n.parentId || !byId.has(n.parentId),
+      );
       roots.forEach((root) => render(root, 0));
       const orphaned = map.nodes.filter((n) => !visited.has(n.id));
-      if (orphaned.length) { lines.push("", "## Unattached or cyclic nodes"); orphaned.forEach((n) => render(n, 0)); }
+      if (orphaned.length) {
+        lines.push("", "## Unattached or cyclic nodes");
+        orphaned.forEach((n) => render(n, 0));
+      }
       const dir = FileSystem.cacheDirectory;
       if (!dir) throw new Error("No writable cache directory is available.");
-      const safeName = map.name.replace(/[^a-z0-9-_]+/gi, "-").replace(/^-|-$/g, "") || "map";
+      const safeName =
+        map.name.replace(/[^a-z0-9-_]+/gi, "-").replace(/^-|-$/g, "") || "map";
       const uri = `${dir}lifemap-${safeName}-chatgpt.md`;
-      await FileSystem.writeAsStringAsync(uri, lines.join("\n"), { encoding: FileSystem.EncodingType.UTF8 });
-      if (await Sharing.isAvailableAsync()) await Sharing.shareAsync(uri, { mimeType: "text/markdown", dialogTitle: "Export map for ChatGPT" });
+      await FileSystem.writeAsStringAsync(uri, lines.join("\n"), {
+        encoding: FileSystem.EncodingType.UTF8,
+      });
+      if (await Sharing.isAvailableAsync())
+        await Sharing.shareAsync(uri, {
+          mimeType: "text/markdown",
+          dialogTitle: "Export map for ChatGPT",
+        });
       else Alert.alert("Export created", uri);
-    } catch (e) { Alert.alert("Export failed", e instanceof Error ? e.message : "Could not export map details."); }
+    } catch (e) {
+      Alert.alert(
+        "Export failed",
+        e instanceof Error ? e.message : "Could not export map details.",
+      );
+    }
   };
 
   const importBackup = async () => {
@@ -560,6 +605,7 @@ function AppContent() {
                 <View style={{ flex: 1 }}>
                   <Text style={s.mapName}>{m.name}</Text>
                   <Text style={s.mapMeta}>
+                    {m.type === "genogram" ? "Genogram" : "Mind map"} ·{" "}
                     {m.nodes.length} nodes · Updated{" "}
                     {new Date(m.updatedAt).toLocaleDateString()}
                   </Text>
@@ -608,10 +654,17 @@ function AppContent() {
                   {activeMap.nodes.length} nodes · Auto-saved
                 </Text>
               </View>
-              <Pressable style={s.iconButton} onPress={() => exportChatGPT(activeMap)}><Text style={s.iconButtonText}>AI</Text></Pressable>
+              <Pressable
+                style={s.iconButton}
+                onPress={() => exportChatGPT(activeMap)}
+              >
+                <Text style={s.iconButtonText}>↓</Text>
+              </Pressable>
               <Text style={s.zoomLabel}>{Math.round(zoom * 100)}%</Text>
             </View>
-            {!detailsExpanded && <View style={s.canvasWrap}>
+            <View
+              style={[s.canvasWrap, detailsExpanded && { display: "none" }]}
+            >
               <Text style={s.canvasHint}>
                 Drag nodes to arrange · Drag green dots onto nodes to reparent
                 or into empty space to create a child · Pinch to zoom
@@ -619,7 +672,14 @@ function AppContent() {
               <MapCanvas
                 map={activeMap}
                 collapsedNodeIds={activeMap.collapsedNodeIds || []}
-                onToggleCollapse={(id) => updateMap(activeMap.id, (m) => ({ ...m, collapsedNodeIds: (m.collapsedNodeIds || []).includes(id) ? (m.collapsedNodeIds || []).filter((v) => v !== id) : [...(m.collapsedNodeIds || []), id] }))}
+                onToggleCollapse={(id) =>
+                  updateMap(activeMap.id, (m) => ({
+                    ...m,
+                    collapsedNodeIds: (m.collapsedNodeIds || []).includes(id)
+                      ? (m.collapsedNodeIds || []).filter((v) => v !== id)
+                      : [...(m.collapsedNodeIds || []), id],
+                  }))
+                }
                 selectedNodeId={selectedNodeId}
                 zoom={zoom}
                 onZoomChange={setZoom}
@@ -632,9 +692,13 @@ function AppContent() {
                 onReparent={reparentNode}
                 onCreateChild={createChildAtConnection}
               />
-            </View>}
+            </View>
             {detailsExpanded && (
-              <KeyboardAvoidingView behavior={Platform.OS === "ios" ? "padding" : undefined} style={s.nodePanel} keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}>
+              <KeyboardAvoidingView
+                behavior={Platform.OS === "ios" ? "padding" : undefined}
+                style={s.nodePanel}
+                keyboardVerticalOffset={Platform.OS === "ios" ? 8 : 0}
+              >
                 <View style={s.panelHeader}>
                   <Pressable
                     style={s.panelToggle}
@@ -650,9 +714,7 @@ function AppContent() {
                           : "Select a node or add a branch"}
                       </Text>
                     </View>
-                    <Text style={s.panelChevron}>
-                      {"✕"}
-                    </Text>
+                    <Text style={s.panelChevron}>{"✕"}</Text>
                   </Pressable>
                   {selectedNode ? (
                     <Pressable
@@ -1164,7 +1226,7 @@ function MapCanvas({
         focalY: fy,
       };
     const base = pinchStart.current;
-    const nextZoom = Math.max(0.30, Math.min(2.5, base.zoom * e.scale));
+    const nextZoom = Math.max(0.3, Math.min(2.5, base.zoom * e.scale));
     const worldX =
       base.cameraX + (base.focalX - viewport.width / 2) / base.zoom;
     const worldY =
@@ -1194,7 +1256,10 @@ function MapCanvas({
   while (queue.length) {
     const parentId = queue.shift()!;
     for (const child of map.nodes.filter((n) => n.parentId === parentId)) {
-      if (!hiddenIds.has(child.id)) { hiddenIds.add(child.id); queue.push(child.id); }
+      if (!hiddenIds.has(child.id)) {
+        hiddenIds.add(child.id);
+        queue.push(child.id);
+      }
     }
   }
   const visibleNodes = map.nodes.filter((node) => {
@@ -1208,7 +1273,13 @@ function MapCanvas({
     );
   });
   const connectors = map.nodes
-    .filter((node) => !hiddenIds.has(node.id) && node.parentId && byId.has(node.parentId) && !hiddenIds.has(node.parentId))
+    .filter(
+      (node) =>
+        !hiddenIds.has(node.id) &&
+        node.parentId &&
+        byId.has(node.parentId) &&
+        !hiddenIds.has(node.parentId),
+    )
     .map((node) => {
       const parent = byId.get(node.parentId!)!;
       const inferred = autoConnectionSides(parent, node);
@@ -1281,30 +1352,31 @@ function MapCanvas({
   };
   // A selected node can become hidden when one of its ancestors is collapsed.
   // Do not leave its connection handles (green extender dots) on the canvas.
-  const connectionHandles = selectedNodeId && !hiddenIds.has(selectedNodeId)
-    ? (() => {
-        const node = byId.get(selectedNodeId);
-        if (!node) return null;
-        const p = screen(node);
-        return SIDES.map((side) => {
-          const pt = sidePoint(node, side, nodeWidth, nodeHeight);
-          const sx = viewport.width / 2 + (pt.x - camera.x) * zoom;
-          const sy = viewport.height / 2 + (pt.y - camera.y) * zoom;
-          return (
-            <ConnectionHandle
-              key={`${node.id}-${side}`}
-              x={sx}
-              y={sy}
-              side={side}
-              zoom={zoom}
-              onDragEnd={(dx, dy) =>
-                handleReparentDrop(node.id, side, sx + dx, sy + dy)
-              }
-            />
-          );
-        });
-      })()
-    : null;
+  const connectionHandles =
+    selectedNodeId && !hiddenIds.has(selectedNodeId)
+      ? (() => {
+          const node = byId.get(selectedNodeId);
+          if (!node) return null;
+          const p = screen(node);
+          return SIDES.map((side) => {
+            const pt = sidePoint(node, side, nodeWidth, nodeHeight);
+            const sx = viewport.width / 2 + (pt.x - camera.x) * zoom;
+            const sy = viewport.height / 2 + (pt.y - camera.y) * zoom;
+            return (
+              <ConnectionHandle
+                key={`${node.id}-${side}`}
+                x={sx}
+                y={sy}
+                side={side}
+                zoom={zoom}
+                onDragEnd={(dx, dy) =>
+                  handleReparentDrop(node.id, side, sx + dx, sy + dy)
+                }
+              />
+            );
+          });
+        })()
+      : null;
 
   return (
     <PinchGestureHandler
@@ -1335,23 +1407,49 @@ function MapCanvas({
           const collapsed = collapsedNodeIds.includes(node.id);
           return (
             <React.Fragment key={node.id}>
-            <DraggableNode
-              node={node}
-              selected={node.id === selectedNodeId}
-              width={nodeWidth}
-              height={nodeHeight}
-              zoom={zoom}
-              screenX={p.x}
-              screenY={p.y}
-              onSelect={() => onSelect(node.id)}
-              onOpenDetails={() => onOpenDetails(node.id)}
-              onMove={(x, y) => onMove(node.id, x, y)}
-            />
-            {hasChildren && (
-              <Pressable onPress={() => onToggleCollapse(node.id)} style={{ position: "absolute", left: p.x + nodeWidth * zoom / 2 - 10, top: p.y + nodeHeight * zoom / 2 - 10, width: 22, height: 22, borderRadius: 11, backgroundColor: C.primary, borderWidth: 2, borderColor: "#FFFFFF", alignItems: "center", justifyContent: "center", zIndex: 25, elevation: 6 }}>
-                <Text style={{ color: "#FFFFFF", fontSize: 14, fontWeight: "800", lineHeight: 17 }}>{collapsed ? "+" : "−"}</Text>
-              </Pressable>
-            )}
+              <DraggableNode
+                node={node}
+                selected={node.id === selectedNodeId}
+                width={nodeWidth}
+                height={nodeHeight}
+                zoom={zoom}
+                screenX={p.x}
+                screenY={p.y}
+                onSelect={() => onSelect(node.id)}
+                onOpenDetails={() => onOpenDetails(node.id)}
+                onMove={(x, y) => onMove(node.id, x, y)}
+              />
+              {hasChildren && (
+                <Pressable
+                  onPress={() => onToggleCollapse(node.id)}
+                  style={{
+                    position: "absolute",
+                    left: p.x + (nodeWidth * zoom) / 2 - 10,
+                    top: p.y + (nodeHeight * zoom) / 2 - 10,
+                    width: 22,
+                    height: 22,
+                    borderRadius: 11,
+                    backgroundColor: C.primary,
+                    borderWidth: 2,
+                    borderColor: "#FFFFFF",
+                    alignItems: "center",
+                    justifyContent: "center",
+                    zIndex: 25,
+                    elevation: 6,
+                  }}
+                >
+                  <Text
+                    style={{
+                      color: "#FFFFFF",
+                      fontSize: 14,
+                      fontWeight: "800",
+                      lineHeight: 17,
+                    }}
+                  >
+                    {collapsed ? "+" : "−"}
+                  </Text>
+                </Pressable>
+              )}
             </React.Fragment>
           );
         })}
@@ -1360,7 +1458,8 @@ function MapCanvas({
           <Text style={s.canvasFooterText}>
             Drag green dots onto nodes to reparent, or into empty space to
             create a child · pinch to zoom · drag empty space to pan ·{" "}
-            {Math.round(zoom * 100)}% · {visibleNodes.length}/{map.nodes.length} visible nodes
+            {Math.round(zoom * 100)}% · {visibleNodes.length}/{map.nodes.length}{" "}
+            visible nodes
           </Text>
         </View>
       </View>
@@ -1512,7 +1611,14 @@ function DraggableNode({
         borderRadius: 14 * zoom,
         borderWidth: (selected ? 2.5 : 1) * zoom,
         borderColor: selected ? C.primary : "#D3E2DB",
-        backgroundColor: node.color,
+        backgroundColor:
+          node.status === "planned"
+            ? "#DDE8FB"
+            : node.status === "in-progress"
+              ? "#DDE8FB"
+              : node.status === "done"
+                ? "#D8F0DF"
+                : "#F9DDDD",
         alignItems: "center",
         justifyContent: "center",
         paddingHorizontal: 7 * zoom,
